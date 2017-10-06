@@ -281,8 +281,8 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
         &self,
         instance: ty::InstanceDef<'tcx>,
     ) -> EvalResult<'tcx, &'tcx mir::Mir<'tcx>> {
-        // do not continue if typeck errors occurred
-        if self.tcx.typeck_tables_of(instance.def_id()).tainted_by_errors {
+        // do not continue if typeck errors occurred (can only occur in local crate)
+        if instance.def_id().is_local() && self.tcx.typeck_tables_of(instance.def_id()).tainted_by_errors {
             return err!(TypeckError);
         }
         trace!("load mir {:?}", instance);
