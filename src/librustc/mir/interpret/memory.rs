@@ -132,7 +132,7 @@ pub enum MemoryKind<T> {
     /// Error if deallocated except during a stack pop
     Stack,
     /// A mutable Static. All the others are interned in the tcx
-    MutableStatic,
+    MutableStatic, // FIXME: move me into the machine, rustc const eval doesn't need them
     /// Additional memory kinds a machine wishes to distinguish from the builtin ones
     Machine(T),
 }
@@ -553,7 +553,10 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
         );
         self.check_bounds(ptr.offset(len, &*self)?, true)?; // if ptr.offset is in bounds, then so is ptr (because offset checks for overflow)
 
-        let locks = self.locks.get_mut(&ptr.alloc_id.0).ok_or(EvalErrorKind::DanglingPointerDeref)?;
+        let locks = match self.locks.get_mut(&ptr.alloc_id.0) {
+            Some(locks) => locks,
+            None => return Ok(()),
+        };
 
         // Iterate over our range and acquire the lock.  If the range is already split into pieces,
         // we have to manipulate all of them.
@@ -598,7 +601,10 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
     ) -> EvalResult<'tcx> {
         assert!(len > 0);
         let cur_frame = self.cur_frame;
-        let locks = self.locks.get_mut(&ptr.alloc_id.0).ok_or(EvalErrorKind::DanglingPointerDeref)?;
+        let locks = match self.locks.get_mut(&ptr.alloc_id.0) {
+            Some(locks) => locks,
+            None => return Ok(()),
+        };
 
         'locks: for lock in locks.iter_mut(ptr.offset, len) {
             let is_our_lock = match lock.active {
@@ -672,7 +678,10 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
             frame: cur_frame,
             path: lock_path.clone(),
         };
-        let locks = self.locks.get_mut(&ptr.alloc_id.0).ok_or(EvalErrorKind::DanglingPointerDeref)?;
+        let locks = match self.locks.get_mut(&ptr.alloc_id.0) {
+            Some(locks) => locks,
+            None => return Ok(()),
+        };
 
         for lock in locks.iter_mut(ptr.offset, len) {
             // Check if we have a suspension here
@@ -1013,10 +1022,14 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
         alloc: AllocId,
         mutability: Mutability,
     ) -> EvalResult<'tcx> {
-        if self.alloc_map.contains_key(&alloc.0) {
-            self.mark_static_initalized(alloc, mutability)?;
+        match self.alloc_kind.get(&alloc.0) {
+            // do not go into immutable statics
+            None |
+            // or mutable statics
+            Some(&MemoryKind::MutableStatic) => Ok(()),
+            // just locals and machine allocs
+            Some(_) => self.mark_static_initalized(alloc, mutability),
         }
-        Ok(())
     }
 
     /// mark an allocation as static and initialized, either mutable or not
@@ -1032,7 +1045,8 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
         );
         if mutability == Mutability::Immutable {
             let alloc = self.alloc_map.remove(&alloc_id.0);
-            let _ = self.alloc_kind.remove(&alloc_id.0);
+            let kind = self.alloc_kind.remove(&alloc_id.0);
+            assert_ne!(kind, Some(MemoryKind::MutableStatic));
             let uninit = self.uninitialized_statics.remove(&alloc_id.0);
             if let Some(alloc) = alloc.or(uninit) {
                 let alloc = self.tcx.intern_const_alloc(alloc);
@@ -1044,6 +1058,10 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
             }
             return Ok(());
         }
+        // We are marking the static as initialized, so move it out of the uninit map
+        if let Some(uninit) = self.uninitialized_statics.remove(&alloc_id.0) {
+            self.alloc_map.insert(alloc_id.0, uninit);
+        }
         // do not use `self.get_mut(alloc_id)` here, because we might have already marked a
         // sub-element or have circular pointers (e.g. `Rc`-cycles)
         let relocations = match self.alloc_map.get_mut(&alloc_id.0) {
@@ -1051,16 +1069,18 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
                      ref mut relocations,
                      ..
                  }) => {
-                match self.alloc_kind[&alloc_id.0] {
+                match self.alloc_kind.get(&alloc_id.0) {
                     // const eval results can refer to "locals".
                     // E.g. `const Foo: &u32 = &1;` refers to the temp local that stores the `1`
-                    MemoryKind::Stack => {},
-                    MemoryKind::Machine(m) => M::mark_static_initialized(m)?,
-                    MemoryKind::MutableStatic => {
+                    None |
+                    Some(&MemoryKind::Stack) => {},
+                    Some(&MemoryKind::Machine(m)) => M::mark_static_initialized(m)?,
+                    Some(&MemoryKind::MutableStatic) => {
                         trace!("mark_static_initalized: skipping already initialized static referred to by static currently being initialized");
                         return Ok(());
                     },
                 }
+                // overwrite or insert
                 self.alloc_kind.insert(alloc_id.0, MemoryKind::MutableStatic);
                 // take out the relocations vector to free the borrow on self, so we can call
                 // mark recursively
