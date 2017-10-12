@@ -941,8 +941,6 @@ pub struct InterpretInterner<'tcx> {
 
     /// The AllocId to assign to the next new regular allocation.
     /// Always incremented, never gets smaller.
-    ///
-    /// A u64 will never overflow when being incremented.
     next_id: u64,
 
     /// Allows checking whether a constant already has an allocation
@@ -1004,7 +1002,11 @@ impl<'tcx> InterpretInterner<'tcx> {
         &mut self,
     ) -> u64 {
         let next = self.next_id;
-        self.next_id += 1;
+        self.next_id
+            .checked_add(1)
+            .expect("You overflowed a u64 by incrementing by 1... \
+                     You've just earned yourself a free drink if we ever meet. \
+                     Seriously, how did you do that?!");
         next
     }
 }
