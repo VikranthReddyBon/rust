@@ -6,8 +6,7 @@ use std::cmp::Ordering;
 
 use super::{EvalResult, EvalContext, Lvalue, Machine, ValTy};
 
-use super::value::{PrimVal, PrimValKind, Value, bytes_to_f32, bytes_to_f64, f32_to_bytes,
-                   f64_to_bytes};
+use super::value::{PrimVal, PrimValKind, Value, bytes_to_f32, bytes_to_f64};
 
 impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
     fn binop_with_overflow(
@@ -255,8 +254,8 @@ pub fn unary_op<'tcx>(
         (Neg, I64) => -(bytes as i64) as u128,
         (Neg, I128) => -(bytes as i128) as u128,
 
-        (Neg, F32) => f32_to_bytes(-bytes_to_f32(bytes)),
-        (Neg, F64) => f64_to_bytes(-bytes_to_f64(bytes)),
+        (Neg, F32) => (-bytes_to_f32(bytes)).bits,
+        (Neg, F64) => (-bytes_to_f64(bytes)).bits,
 
         _ => {
             let msg = format!("unimplemented unary op: {:?}, {:?}", un_op, val);

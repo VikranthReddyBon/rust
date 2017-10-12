@@ -1450,6 +1450,7 @@ dependencies = [
  "log_settings 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "owning_ref 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "regex 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rustc_apfloat 0.0.0",
  "rustc_back 0.0.0",
  "rustc_const_math 0.0.0",
  "rustc_data_structures 0.0.0",
