@@ -800,9 +800,9 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
                     int.get_alloc(id.0)
                         // no alloc? produce an error
                         .ok_or_else(|| if int.get_fn(id.0).is_some() {
-                            EvalErrorKind::DanglingPointerDeref.into()
-                        } else {
                             EvalErrorKind::DerefFunctionPointer.into()
+                        } else {
+                            EvalErrorKind::DanglingPointerDeref.into()
                         })
                 },
             },
@@ -818,17 +818,17 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
             Some(alloc) => Ok(alloc),
             // uninitialized static alloc?
             None => match self.uninitialized_statics.get_mut(&id.0) {
-                    Some(alloc) => Ok(alloc),
+                Some(alloc) => Ok(alloc),
                 None => {
                     let int = self.tcx.interpret_interner.borrow();
                     // no alloc or immutable alloc? produce an error
                     if int.get_alloc(id.0).is_some() {
                         err!(ModifiedConstantMemory)
                     } else if int.get_fn(id.0).is_some() {
-                        err!(DanglingPointerDeref)
-                    } else {
                         err!(DerefFunctionPointer)
-            }
+                    } else {
+                        err!(DanglingPointerDeref)
+                    }
                 },
             },
         }
