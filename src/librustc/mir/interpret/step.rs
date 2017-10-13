@@ -38,6 +38,8 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
         let mir = self.mir();
         let basic_block = &mir.basic_blocks()[block];
 
+        let old_frames = self.cur_frame();
+
         if let Some(stmt) = basic_block.statements.get(stmt_id) {
             let mut new = Ok(false);
             ConstantExtractor {
@@ -57,6 +59,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
             // if ConstantExtractor added a new frame, we don't execute anything here
             // but await the next call to step
             if !new? {
+                assert_eq!(old_frames, self.cur_frame());
                 self.statement(stmt)?;
             }
             return Ok(true);
@@ -81,6 +84,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
         // if ConstantExtractor added a new frame, we don't execute anything here
         // but await the next call to step
         if !new? {
+            assert_eq!(old_frames, self.cur_frame());
             self.terminator(terminator)?;
         }
         Ok(true)
@@ -266,19 +270,19 @@ impl<'a, 'b, 'tcx, M: Machine<'tcx>> ConstantExtractor<'a, 'b, 'tcx, M> {
     fn try<F: FnOnce(&mut Self) -> EvalResult<'tcx, bool>>(&mut self, f: F) {
         match *self.new_constant {
             // already computed a constant, don't do more than one per iteration
-            Ok(true) => return,
+            Ok(true) => {},
             // no constants computed yet
             Ok(false) => *self.new_constant = f(self),
             // error happened, abort the visitor traversing
-            Err(_) => return,
+            Err(_) => {},
         }
     }
 }
 
 impl<'a, 'b, 'tcx, M: Machine<'tcx>> Visitor<'tcx> for ConstantExtractor<'a, 'b, 'tcx, M> {
     fn visit_constant(&mut self, constant: &mir::Constant<'tcx>, location: mir::Location) {
+        self.super_constant(constant, location);
         self.try(|this| {
-            this.super_constant(constant, location);
             match constant.literal {
                 // already computed by rustc
                 mir::Literal::Value { value: &ty::Const { val: ConstVal::Unevaluated(def_id, substs), .. } } => {
@@ -347,8 +351,8 @@ impl<'a, 'b, 'tcx, M: Machine<'tcx>> Visitor<'tcx> for ConstantExtractor<'a, 'b,
         context: LvalueContext<'tcx>,
         location: mir::Location,
     ) {
+        self.super_lvalue(lvalue, context, location);
         self.try(|this| {
-            this.super_lvalue(lvalue, context, location);
             if let mir::Lvalue::Static(ref static_) = *lvalue {
                 let def_id = static_.def_id;
                 let span = this.span;
