@@ -945,7 +945,10 @@ fn check_ctfe_against_miri<'a, 'tcx>(
             let (struct_variant, extra) = if def.is_enum() {
                 let ptr = miri_val.ptr.to_ptr().unwrap();
                 let discr = ecx.read_discriminant_value(ptr, miri_ty).unwrap();
-                (&def.variants[discr as usize], LvalueExtra::DowncastVariant(discr as usize))
+                let variant = def.discriminants(tcx).position(|variant_discr| {
+                    variant_discr.to_u128_unchecked() == discr
+                }).expect("miri produced invalid enum discriminant");
+                (&def.variants[variant], LvalueExtra::DowncastVariant(variant))
             } else {
                 (def.struct_variant(), LvalueExtra::None)
             };
