@@ -18,6 +18,7 @@ use hir;
 use hir::def::Def;
 use hir::def_id::DefId;
 use middle::resolve_lifetime as rl;
+use namespace::Namespace;
 use rustc::ty::subst::{Kind, Subst, Substs};
 use rustc::traits;
 use rustc::ty::{self, Ty, TyCtxt, ToPredicate, TypeFoldable};
@@ -356,9 +357,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
         poly_projections.extend(assoc_bindings.iter().filter_map(|binding| {
             // specify type to assert that error was already reported in Err case:
             let predicate: Result<_, ErrorReported> =
-                self.ast_type_binding_to_poly_projection_predicate(trait_ref.ref_id,
-                                                                   poly_trait_ref,
-                                                                   binding);
+                self.ast_type_binding_to_poly_projection_predicate(poly_trait_ref, binding);
             predicate.ok() // ok to ignore Err() because ErrorReported (see above)
         }));
 
@@ -423,13 +422,13 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
                                            -> bool
     {
         self.tcx().associated_items(trait_def_id).any(|item| {
-            item.kind == ty::AssociatedKind::Type && item.name == assoc_name
+            item.kind == ty::AssociatedKind::Type &&
+            self.tcx().hygienic_eq(assoc_name, item.name, trait_def_id)
         })
     }
 
     fn ast_type_binding_to_poly_projection_predicate(
         &self,
-        _path_id: ast::NodeId,
         trait_ref: ty::PolyTraitRef<'tcx>,
         binding: &ConvertedBinding<'tcx>)
         -> Result<ty::PolyProjectionPredicate<'tcx>, ErrorReported>
@@ -504,7 +503,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
 
         let candidate = self.one_bound_for_assoc_type(candidates,
                                                       &trait_ref.to_string(),
-                                                      &binding.item_name.as_str(),
+                                                      binding.item_name,
                                                       binding.span)?;
 
         Ok(candidate.map_bound(|trait_ref| {
@@ -702,7 +701,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
         let param_name = tcx.hir.ty_param_name(param_node_id);
         self.one_bound_for_assoc_type(suitable_bounds,
                                       &param_name.as_str(),
-                                      &assoc_name.as_str(),
+                                      assoc_name,
                                       span)
     }
 
@@ -712,7 +711,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
     fn one_bound_for_assoc_type<I>(&self,
                                 mut bounds: I,
                                 ty_param_name: &str,
-                                assoc_name: &str,
+                                assoc_name: ast::Name,
                                 span: Span)
         -> Result<ty::PolyTraitRef<'tcx>, ErrorReported>
         where I: Iterator<Item=ty::PolyTraitRef<'tcx>>
@@ -741,7 +740,8 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
 
             for bound in bounds {
                 let bound_span = self.tcx().associated_items(bound.def_id()).find(|item| {
-                    item.kind == ty::AssociatedKind::Type && item.name == assoc_name
+                    item.kind == ty::AssociatedKind::Type &&
+                    self.tcx().hygienic_eq(assoc_name, item.name, bound.def_id())
                 })
                 .and_then(|item| self.tcx().hir.span_if_local(item.def_id));
 
@@ -802,10 +802,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
                     .filter(|r| self.trait_defines_associated_type_named(r.def_id(),
                                                                          assoc_name));
 
-                match self.one_bound_for_assoc_type(candidates,
-                                                    "Self",
-                                                    &assoc_name.as_str(),
-                                                    span) {
+                match self.one_bound_for_assoc_type(candidates, "Self", assoc_name, span) {
                     Ok(bound) => bound,
                     Err(ErrorReported) => return (tcx.types.err, Def::Err),
                 }
@@ -830,14 +827,17 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
         };
 
         let trait_did = bound.0.def_id;
-        let item = tcx.associated_items(trait_did).find(|i| i.name == assoc_name)
-                                                  .expect("missing associated type");
+        let (assoc_ident, def_scope) = tcx.adjust(assoc_name, trait_did, ref_id);
+        let item = tcx.associated_items(trait_did).find(|i| {
+            Namespace::from(i.kind) == Namespace::Type &&
+            i.name.to_ident() == assoc_ident
+        })
+        .expect("missing associated type");
 
         let ty = self.projected_ty_from_poly_trait_ref(span, item.def_id, bound);
         let ty = self.normalize_ty(span, ty);
 
         let def = Def::AssociatedTy(item.def_id);
-        let def_scope = tcx.adjust(assoc_name, item.container.id(), ref_id).1;
         if !item.vis.is_accessible_from(def_scope, tcx) {
             let msg = format!("{} `{}` is private", def.kind_name(), assoc_name);
             tcx.sess.span_err(span, &msg);
@@ -1468,7 +1468,7 @@ impl<'tcx> ExplicitSelf<'tcx> {
     /// declaration like `self: SomeType` into either `self`,
     /// `&self`, `&mut self`, or `Box<self>`. We do this here
     /// by some simple pattern matching. A more precise check
-    /// is done later in `check_method_self_type()`.
+    /// is done later in `check_method_receiver()`.
     ///
     /// Examples:
     ///
@@ -1479,7 +1479,7 @@ impl<'tcx> ExplicitSelf<'tcx> {
     ///     fn method2(self: &T); // ExplicitSelf::ByValue
     ///     fn method3(self: Box<&T>); // ExplicitSelf::ByBox
     ///
-    ///     // Invalid cases will be caught later by `check_method_self_type`:
+    ///     // Invalid cases will be caught later by `check_method_receiver`:
     ///     fn method_err1(self: &mut T); // ExplicitSelf::ByReference
     /// }
     /// ```

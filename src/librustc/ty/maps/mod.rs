@@ -15,6 +15,7 @@ use hir::def::{Def, Export};
 use hir::{self, TraitCandidate, ItemLocalId};
 use hir::svh::Svh;
 use lint;
+use middle::borrowck::BorrowCheckResult;
 use middle::const_val;
 use middle::cstore::{ExternCrate, LinkagePreference, NativeLibrary,
                      ExternBodyNestedBodies};
@@ -183,7 +184,7 @@ define_maps! { <'tcx>
 
     [] fn coherent_trait: coherent_trait_dep_node((CrateNum, DefId)) -> (),
 
-    [] fn borrowck: BorrowCheck(DefId) -> (),
+    [] fn borrowck: BorrowCheck(DefId) -> Rc<BorrowCheckResult>,
     // FIXME: shouldn't this return a `Result<(), BorrowckErrors>` instead?
     [] fn mir_borrowck: MirBorrowCheck(DefId) -> (),
 
@@ -228,6 +229,8 @@ define_maps! { <'tcx>
     [] fn item_body_nested_bodies: ItemBodyNestedBodies(DefId) -> ExternBodyNestedBodies,
     [] fn const_is_rvalue_promotable_to_static: ConstIsRvaluePromotableToStatic(DefId) -> bool,
     [] fn is_mir_available: IsMirAvailable(DefId) -> bool,
+    [] fn vtable_methods: vtable_methods_node(ty::PolyTraitRef<'tcx>)
+                          -> Rc<Vec<Option<(DefId, &'tcx Substs<'tcx>)>>>,
 
     [] fn trans_fulfill_obligation: fulfill_obligation_dep_node(
         (ty::ParamEnv<'tcx>, ty::PolyTraitRef<'tcx>)) -> Vtable<'tcx, ()>,
@@ -469,4 +472,8 @@ fn collect_and_partition_translation_items_node<'tcx>(_: CrateNum) -> DepConstru
 
 fn output_filenames_node<'tcx>(_: CrateNum) -> DepConstructor<'tcx> {
     DepConstructor::OutputFilenames
+}
+
+fn vtable_methods_node<'tcx>(trait_ref: ty::PolyTraitRef<'tcx>) -> DepConstructor<'tcx> {
+    DepConstructor::VtableMethods{ trait_ref }
 }

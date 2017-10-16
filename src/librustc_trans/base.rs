@@ -886,6 +886,11 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     check_for_rustc_errors_attr(tcx);
 
+    if tcx.sess.opts.debugging_opts.thinlto {
+        if unsafe { !llvm::LLVMRustThinLTOAvailable() } {
+            tcx.sess.fatal("this compiler's LLVM does not support ThinLTO");
+        }
+    }
 
     let crate_hash = tcx.dep_graph
                         .fingerprint_of(&DepNode::new_no_params(DepKind::Krate));
@@ -925,7 +930,8 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             time_graph.clone(),
             link_meta,
             metadata,
-            rx);
+            rx,
+            1);
 
         ongoing_translation.submit_pre_translated_module_to_llvm(tcx, metadata_module);
         ongoing_translation.translation_finished(tcx);
@@ -961,7 +967,8 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         time_graph.clone(),
         link_meta,
         metadata,
-        rx);
+        rx,
+        codegen_units.len());
 
     // Translate an allocator shim, if any
     let allocator_module = if let Some(kind) = tcx.sess.allocator_kind.get() {
@@ -1211,7 +1218,7 @@ fn collect_and_partition_translation_items<'a, 'tcx>(
     let strategy = if tcx.sess.opts.debugging_opts.incremental.is_some() {
         PartitioningStrategy::PerModule
     } else {
-        PartitioningStrategy::FixedUnitCount(tcx.sess.opts.codegen_units)
+        PartitioningStrategy::FixedUnitCount(tcx.sess.codegen_units())
     };
 
     let codegen_units = time(time_passes, "codegen unit partitioning", || {
@@ -1223,9 +1230,6 @@ fn collect_and_partition_translation_items<'a, 'tcx>(
             .map(Arc::new)
             .collect::<Vec<_>>()
     });
-
-    assert!(tcx.sess.opts.codegen_units == codegen_units.len() ||
-            tcx.sess.opts.debugging_opts.incremental.is_some());
 
     let translation_items: DefIdSet = items.iter().filter_map(|trans_item| {
         match *trans_item {
@@ -1372,7 +1376,9 @@ fn compile_codegen_unit<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         // crashes if the module identifier is same as other symbols
         // such as a function name in the module.
         // 1. http://llvm.org/bugs/show_bug.cgi?id=11479
-        let llmod_id = format!("{}.rs", cgu.name());
+        let llmod_id = format!("{}-{}.rs",
+                               cgu.name(),
+                               tcx.crate_disambiguator(LOCAL_CRATE));
 
         // Instantiate translation items without filling out definitions yet...
         let scx = SharedCrateContext::new(tcx);

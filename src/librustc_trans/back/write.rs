@@ -19,7 +19,7 @@ use rustc::session::config::{self, OutputFilenames, OutputType, OutputTypes, Pas
                              AllPasses, Sanitizer};
 use rustc::session::Session;
 use rustc::util::nodemap::FxHashMap;
-use time_graph::{self, TimeGraph};
+use time_graph::{self, TimeGraph, Timeline};
 use llvm;
 use llvm::{ModuleRef, TargetMachineRef, PassManagerRef, DiagnosticInfoRef};
 use llvm::{SMDiagnosticRef, ContextRef};
@@ -217,7 +217,7 @@ pub struct ModuleConfig {
     passes: Vec<String>,
     /// Some(level) to optimize at a certain level, or None to run
     /// absolutely no optimizations (used for the metadata module).
-    opt_level: Option<llvm::CodeGenOptLevel>,
+    pub opt_level: Option<llvm::CodeGenOptLevel>,
 
     /// Some(level) to optimize binary size, or None to not affect program size.
     opt_size: Option<llvm::CodeGenOptSize>,
@@ -303,6 +303,7 @@ pub struct CodegenContext {
     // Resouces needed when running LTO
     pub time_passes: bool,
     pub lto: bool,
+    pub thinlto: bool,
     pub no_landing_pads: bool,
     pub save_temps: bool,
     pub exported_symbols: Arc<ExportedSymbols>,
@@ -315,6 +316,8 @@ pub struct CodegenContext {
     allocator_module_config: Arc<ModuleConfig>,
     pub tm_factory: Arc<Fn() -> Result<TargetMachineRef, String> + Send + Sync>,
 
+    // Number of cgus excluding the allocator/metadata modules
+    pub total_cgus: usize,
     // Handler to use for diagnostics produced during codegen.
     pub diag_emitter: SharedEmitter,
     // LLVM passes added by plugins.
@@ -450,7 +453,8 @@ unsafe extern "C" fn diagnostic_handler(info: DiagnosticInfoRef, user: *mut c_vo
 unsafe fn optimize(cgcx: &CodegenContext,
                    diag_handler: &Handler,
                    mtrans: &ModuleTranslation,
-                   config: &ModuleConfig)
+                   config: &ModuleConfig,
+                   timeline: &mut Timeline)
     -> Result<(), FatalError>
 {
     let (llmod, llcx, tm) = match mtrans.source {
@@ -503,7 +507,8 @@ unsafe fn optimize(cgcx: &CodegenContext,
         if !config.no_prepopulate_passes {
             llvm::LLVMRustAddAnalysisPasses(tm, fpm, llmod);
             llvm::LLVMRustAddAnalysisPasses(tm, mpm, llmod);
-            with_llvm_pmb(llmod, &config, &mut |b| {
+            let opt_level = config.opt_level.unwrap_or(llvm::CodeGenOptLevel::None);
+            with_llvm_pmb(llmod, &config, opt_level, &mut |b| {
                 llvm::LLVMPassManagerBuilderPopulateFunctionPassManager(b, fpm);
                 llvm::LLVMPassManagerBuilderPopulateModulePassManager(b, mpm);
             })
@@ -529,6 +534,7 @@ unsafe fn optimize(cgcx: &CodegenContext,
         // Finally, run the actual optimization passes
         time(config.time_passes, &format!("llvm function passes [{}]", module_name.unwrap()), ||
              llvm::LLVMRustRunFunctionPassManager(fpm, llmod));
+        timeline.record("fpm");
         time(config.time_passes, &format!("llvm module passes [{}]", module_name.unwrap()), ||
              llvm::LLVMRunPassManager(mpm, llmod));
 
@@ -543,7 +549,18 @@ fn generate_lto_work(cgcx: &CodegenContext,
                      modules: Vec<ModuleTranslation>)
     -> Vec<(WorkItem, u64)>
 {
-    let lto_modules = lto::run(cgcx, modules).unwrap_or_else(|e| panic!(e));
+    let mut timeline = cgcx.time_graph.as_ref().map(|tg| {
+        tg.start(TRANS_WORKER_TIMELINE,
+                 TRANS_WORK_PACKAGE_KIND,
+                 "generate lto")
+    }).unwrap_or(Timeline::noop());
+    let mode = if cgcx.lto {
+        lto::LTOMode::WholeCrateGraph
+    } else {
+        lto::LTOMode::JustThisCrate
+    };
+    let lto_modules = lto::run(cgcx, modules, mode, &mut timeline)
+        .unwrap_or_else(|e| panic!(e));
 
     lto_modules.into_iter().map(|module| {
         let cost = module.cost();
@@ -554,9 +571,11 @@ fn generate_lto_work(cgcx: &CodegenContext,
 unsafe fn codegen(cgcx: &CodegenContext,
                   diag_handler: &Handler,
                   mtrans: ModuleTranslation,
-                  config: &ModuleConfig)
+                  config: &ModuleConfig,
+                  timeline: &mut Timeline)
     -> Result<CompiledModule, FatalError>
 {
+    timeline.record("codegen");
     let (llmod, llcx, tm) = match mtrans.source {
         ModuleSource::Translated(ref llvm) => (llvm.llmod, llvm.llcx, llvm.tm),
         ModuleSource::Preexisting(_) => {
@@ -601,7 +620,18 @@ unsafe fn codegen(cgcx: &CodegenContext,
 
     if write_bc {
         let bc_out_c = path2cstr(&bc_out);
-        llvm::LLVMWriteBitcodeToFile(llmod, bc_out_c.as_ptr());
+        if llvm::LLVMRustThinLTOAvailable() {
+            with_codegen(tm, llmod, config.no_builtins, |cpm| {
+                llvm::LLVMRustWriteThinBitcodeToFile(
+                    cpm,
+                    llmod,
+                    bc_out_c.as_ptr(),
+                )
+            });
+        } else {
+            llvm::LLVMWriteBitcodeToFile(llmod, bc_out_c.as_ptr());
+        }
+        timeline.record("bc");
     }
 
     time(config.time_passes, &format!("codegen passes [{}]", module_name.unwrap()),
@@ -644,7 +674,8 @@ unsafe fn codegen(cgcx: &CodegenContext,
             with_codegen(tm, llmod, config.no_builtins, |cpm| {
                 llvm::LLVMRustPrintModule(cpm, llmod, out.as_ptr(), demangle_callback);
                 llvm::LLVMDisposePassManager(cpm);
-            })
+            });
+            timeline.record("ir");
         }
 
         if config.emit_asm {
@@ -665,6 +696,7 @@ unsafe fn codegen(cgcx: &CodegenContext,
             if config.emit_obj {
                 llvm::LLVMDisposeModule(llmod);
             }
+            timeline.record("asm");
         }
 
         if write_obj {
@@ -672,6 +704,7 @@ unsafe fn codegen(cgcx: &CodegenContext,
                 write_output_file(diag_handler, tm, cpm, llmod, &obj_out,
                                   llvm::FileType::ObjectFile)
             })?;
+            timeline.record("obj");
         }
 
         Ok(())
@@ -712,7 +745,8 @@ pub fn start_async_translation(tcx: TyCtxt,
                                time_graph: Option<TimeGraph>,
                                link: LinkMeta,
                                metadata: EncodedMetadata,
-                               coordinator_receive: Receiver<Box<Any + Send>>)
+                               coordinator_receive: Receiver<Box<Any + Send>>,
+                               total_cgus: usize)
                                -> OngoingCrateTranslation {
     let sess = tcx.sess;
     let crate_output = tcx.output_filenames(LOCAL_CRATE);
@@ -836,6 +870,7 @@ pub fn start_async_translation(tcx: TyCtxt,
                                                   shared_emitter,
                                                   trans_worker_send,
                                                   coordinator_receive,
+                                                  total_cgus,
                                                   client,
                                                   time_graph.clone(),
                                                   Arc::new(modules_config),
@@ -1003,10 +1038,10 @@ fn produce_final_output_artifacts(sess: &Session,
         let needs_crate_object = crate_output.outputs.contains_key(&OutputType::Exe);
 
         let keep_numbered_bitcode = needs_crate_bitcode ||
-                (user_wants_bitcode && sess.opts.codegen_units > 1);
+                (user_wants_bitcode && sess.codegen_units() > 1);
 
         let keep_numbered_objects = needs_crate_object ||
-                (user_wants_objects && sess.opts.codegen_units > 1);
+                (user_wants_objects && sess.codegen_units() > 1);
 
         for module in compiled_modules.modules.iter() {
             let module_name = Some(&module.name[..]);
@@ -1045,13 +1080,9 @@ fn produce_final_output_artifacts(sess: &Session,
 }
 
 pub fn dump_incremental_data(trans: &CrateTranslation) {
-    let mut reuse = 0;
-    for mtrans in trans.modules.iter() {
-        if mtrans.pre_existing {
-            reuse += 1;
-        }
-    }
-    eprintln!("incremental: re-using {} out of {} modules", reuse, trans.modules.len());
+    println!("[incremental] Re-using {} out of {} modules",
+              trans.modules.iter().filter(|m| m.pre_existing).count(),
+              trans.modules.len());
 }
 
 enum WorkItem {
@@ -1080,7 +1111,9 @@ enum WorkItemResult {
     NeedsLTO(ModuleTranslation),
 }
 
-fn execute_work_item(cgcx: &CodegenContext, work_item: WorkItem)
+fn execute_work_item(cgcx: &CodegenContext,
+                     work_item: WorkItem,
+                     timeline: &mut Timeline)
     -> Result<WorkItemResult, FatalError>
 {
     let diag_handler = cgcx.create_diag_handler();
@@ -1089,8 +1122,8 @@ fn execute_work_item(cgcx: &CodegenContext, work_item: WorkItem)
         WorkItem::Optimize(mtrans) => mtrans,
         WorkItem::LTO(mut lto) => {
             unsafe {
-                let module = lto.optimize(cgcx)?;
-                let module = codegen(cgcx, &diag_handler, module, config)?;
+                let module = lto.optimize(cgcx, timeline)?;
+                let module = codegen(cgcx, &diag_handler, module, config, timeline)?;
                 return Ok(WorkItemResult::Compiled(module))
             }
         }
@@ -1140,9 +1173,27 @@ fn execute_work_item(cgcx: &CodegenContext, work_item: WorkItem)
         debug!("llvm-optimizing {:?}", module_name);
 
         unsafe {
-            optimize(cgcx, &diag_handler, &mtrans, config)?;
-            if !cgcx.lto || mtrans.kind == ModuleKind::Metadata {
-                let module = codegen(cgcx, &diag_handler, mtrans, config)?;
+            optimize(cgcx, &diag_handler, &mtrans, config, timeline)?;
+
+            let lto = cgcx.lto;
+
+            let auto_thin_lto =
+                cgcx.thinlto &&
+                cgcx.total_cgus > 1 &&
+                mtrans.kind != ModuleKind::Allocator;
+
+            // If we're a metadata module we never participate in LTO.
+            //
+            // If LTO was explicitly requested on the command line, we always
+            // LTO everything else.
+            //
+            // If LTO *wasn't* explicitly requested and we're not a metdata
+            // module, then we may automatically do ThinLTO if we've got
+            // multiple codegen units. Note, however, that the allocator module
+            // doesn't participate here automatically because of linker
+            // shenanigans later on.
+            if mtrans.kind == ModuleKind::Metadata || (!lto && !auto_thin_lto) {
+                let module = codegen(cgcx, &diag_handler, mtrans, config, timeline)?;
                 Ok(WorkItemResult::Compiled(module))
             } else {
                 Ok(WorkItemResult::NeedsLTO(mtrans))
@@ -1187,12 +1238,13 @@ fn start_executing_work(tcx: TyCtxt,
                         shared_emitter: SharedEmitter,
                         trans_worker_send: Sender<Message>,
                         coordinator_receive: Receiver<Box<Any + Send>>,
+                        total_cgus: usize,
                         jobserver: Client,
                         time_graph: Option<TimeGraph>,
                         modules_config: Arc<ModuleConfig>,
                         metadata_config: Arc<ModuleConfig>,
                         allocator_config: Arc<ModuleConfig>)
-                        -> thread::JoinHandle<CompiledModules> {
+                        -> thread::JoinHandle<Result<CompiledModules, ()>> {
     let coordinator_send = tcx.tx_to_llvm_workers.clone();
     let mut exported_symbols = FxHashMap();
     exported_symbols.insert(LOCAL_CRATE, tcx.exported_symbols(LOCAL_CRATE));
@@ -1229,6 +1281,7 @@ fn start_executing_work(tcx: TyCtxt,
         crate_types: sess.crate_types.borrow().clone(),
         each_linked_rlib_for_lto,
         lto: sess.lto(),
+        thinlto: sess.opts.debugging_opts.thinlto,
         no_landing_pads: sess.no_landing_pads(),
         save_temps: sess.opts.cg.save_temps,
         opts: Arc::new(sess.opts.clone()),
@@ -1246,6 +1299,7 @@ fn start_executing_work(tcx: TyCtxt,
         metadata_module_config: metadata_config,
         allocator_module_config: allocator_config,
         tm_factory: target_machine_factory(tcx.sess),
+        total_cgus,
     };
 
     // This is the "main loop" of parallel work happening for parallel codegen.
@@ -1638,7 +1692,7 @@ fn start_executing_work(tcx: TyCtxt,
                 Message::Done { result: Err(()), worker_id: _ } => {
                     shared_emitter.fatal("aborting due to worker thread failure");
                     // Exit the coordinator thread
-                    panic!("aborting due to worker thread failure")
+                    return Err(())
                 }
                 Message::TranslateItem => {
                     bug!("the coordinator should not receive translation requests")
@@ -1664,11 +1718,11 @@ fn start_executing_work(tcx: TyCtxt,
         let compiled_metadata_module = compiled_metadata_module
             .expect("Metadata module not compiled?");
 
-        CompiledModules {
+        Ok(CompiledModules {
             modules: compiled_modules,
             metadata_module: compiled_metadata_module,
             allocator_module: compiled_allocator_module,
-        }
+        })
     });
 
     // A heuristic that determines if we have enough LLVM WorkItems in the
@@ -1743,12 +1797,13 @@ fn spawn_work(cgcx: CodegenContext, work: WorkItem) {
         // as a diagnostic was already sent off to the main thread - just
         // surface that there was an error in this worker.
         bomb.result = {
-            let _timing_guard = cgcx.time_graph.as_ref().map(|tg| {
+            let timeline = cgcx.time_graph.as_ref().map(|tg| {
                 tg.start(time_graph::TimelineId(cgcx.worker),
                          LLVM_WORK_PACKAGE_KIND,
                          &work.name())
             });
-            execute_work_item(&cgcx, work).ok()
+            let mut timeline = timeline.unwrap_or(Timeline::noop());
+            execute_work_item(&cgcx, work, &mut timeline).ok()
         };
     });
 }
@@ -1788,16 +1843,17 @@ pub fn run_assembler(sess: &Session, outputs: &OutputFilenames) {
 
 pub unsafe fn with_llvm_pmb(llmod: ModuleRef,
                             config: &ModuleConfig,
+                            opt_level: llvm::CodeGenOptLevel,
                             f: &mut FnMut(llvm::PassManagerBuilderRef)) {
     // Create the PassManagerBuilder for LLVM. We configure it with
     // reasonable defaults and prepare it to actually populate the pass
     // manager.
     let builder = llvm::LLVMPassManagerBuilderCreate();
-    let opt_level = config.opt_level.unwrap_or(llvm::CodeGenOptLevel::None);
     let opt_size = config.opt_size.unwrap_or(llvm::CodeGenOptSizeNone);
     let inline_threshold = config.inline_threshold;
 
-    llvm::LLVMRustConfigurePassManagerBuilder(builder, opt_level,
+    llvm::LLVMRustConfigurePassManagerBuilder(builder,
+                                              opt_level,
                                               config.merge_functions,
                                               config.vectorize_slp,
                                               config.vectorize_loop);
@@ -1960,7 +2016,7 @@ pub struct OngoingCrateTranslation {
     coordinator_send: Sender<Box<Any + Send>>,
     trans_worker_receive: Receiver<Message>,
     shared_emitter_main: SharedEmitterMain,
-    future: thread::JoinHandle<CompiledModules>,
+    future: thread::JoinHandle<Result<CompiledModules, ()>>,
     output_filenames: Arc<OutputFilenames>,
 }
 
@@ -1968,7 +2024,11 @@ impl OngoingCrateTranslation {
     pub fn join(self, sess: &Session, dep_graph: &DepGraph) -> CrateTranslation {
         self.shared_emitter_main.check(sess, true);
         let compiled_modules = match self.future.join() {
-            Ok(compiled_modules) => compiled_modules,
+            Ok(Ok(compiled_modules)) => compiled_modules,
+            Ok(Err(())) => {
+                sess.abort_if_errors();
+                panic!("expected abort due to worker thread errors")
+            },
             Err(_) => {
                 sess.fatal("Error during translation/LLVM phase.");
             }
@@ -1990,7 +2050,7 @@ impl OngoingCrateTranslation {
 
         // FIXME: time_llvm_passes support - does this use a global context or
         // something?
-        if sess.opts.codegen_units == 1 && sess.time_llvm_passes() {
+        if sess.codegen_units() == 1 && sess.time_llvm_passes() {
             unsafe { llvm::LLVMRustPrintPassTimings(); }
         }
 

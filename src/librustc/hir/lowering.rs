@@ -673,6 +673,7 @@ impl<'a> LoweringContext<'a> {
                     unsafety: self.lower_unsafety(f.unsafety),
                     abi: f.abi,
                     decl: self.lower_fn_decl(&f.decl),
+                    arg_names: self.lower_fn_args_to_names(&f.decl),
                 }))
             }
             TyKind::Never => hir::TyNever,
@@ -704,7 +705,7 @@ impl<'a> LoweringContext<'a> {
                 let expr = self.lower_body(None, |this| this.lower_expr(expr));
                 hir::TyTypeof(expr)
             }
-            TyKind::TraitObject(ref bounds) => {
+            TyKind::TraitObject(ref bounds, ..) => {
                 let mut lifetime_bound = None;
                 let bounds = bounds.iter().filter_map(|bound| {
                     match *bound {

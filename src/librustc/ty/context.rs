@@ -341,8 +341,23 @@ pub struct TypeckTables<'tcx> {
 
     adjustments: ItemLocalMap<Vec<ty::adjustment::Adjustment<'tcx>>>,
 
-    // Stores the actual binding mode for all instances of hir::BindingAnnotation.
+    /// Stores the actual binding mode for all instances of hir::BindingAnnotation.
     pat_binding_modes: ItemLocalMap<BindingMode>,
+
+    /// Stores the types which were implicitly dereferenced in pattern binding modes
+    /// for later usage in HAIR lowering. For example,
+    ///
+    /// ```
+    /// match &&Some(5i32) {
+    ///     Some(n) => {},
+    ///     _ => {},
+    /// }
+    /// ```
+    /// leads to a `vec![&&Option<i32>, &Option<i32>]`. Empty vectors are not stored.
+    ///
+    /// See:
+    /// https://github.com/rust-lang/rfcs/blob/master/text/2005-match-ergonomics.md#definitions
+    pat_adjustments: ItemLocalMap<Vec<Ty<'tcx>>>,
 
     /// Borrows
     pub upvar_capture_map: ty::UpvarCaptureMap<'tcx>,
@@ -398,6 +413,7 @@ impl<'tcx> TypeckTables<'tcx> {
             node_substs: ItemLocalMap(),
             adjustments: ItemLocalMap(),
             pat_binding_modes: ItemLocalMap(),
+            pat_adjustments: ItemLocalMap(),
             upvar_capture_map: FxHashMap(),
             generator_sigs: ItemLocalMap(),
             generator_interiors: ItemLocalMap(),
@@ -578,6 +594,21 @@ impl<'tcx> TypeckTables<'tcx> {
         }
     }
 
+    pub fn pat_adjustments(&self) -> LocalTableInContext<Vec<Ty<'tcx>>> {
+        LocalTableInContext {
+            local_id_root: self.local_id_root,
+            data: &self.pat_adjustments,
+        }
+    }
+
+    pub fn pat_adjustments_mut(&mut self)
+                           -> LocalTableInContextMut<Vec<Ty<'tcx>>> {
+        LocalTableInContextMut {
+            local_id_root: self.local_id_root,
+            data: &mut self.pat_adjustments,
+        }
+    }
+
     pub fn upvar_capture(&self, upvar_id: ty::UpvarId) -> ty::UpvarCapture<'tcx> {
         self.upvar_capture_map[&upvar_id]
     }
@@ -703,6 +734,7 @@ impl<'gcx> HashStable<StableHashingContext<'gcx>> for TypeckTables<'gcx> {
             ref node_substs,
             ref adjustments,
             ref pat_binding_modes,
+            ref pat_adjustments,
             ref upvar_capture_map,
             ref closure_tys,
             ref closure_kinds,
@@ -724,6 +756,7 @@ impl<'gcx> HashStable<StableHashingContext<'gcx>> for TypeckTables<'gcx> {
             node_substs.hash_stable(hcx, hasher);
             adjustments.hash_stable(hcx, hasher);
             pat_binding_modes.hash_stable(hcx, hasher);
+            pat_adjustments.hash_stable(hcx, hasher);
             hash_stable_hashmap(hcx, hasher, upvar_capture_map, |up_var_id, hcx| {
                 let ty::UpvarId {
                     var_id,
@@ -868,11 +901,6 @@ pub struct GlobalCtxt<'tcx> {
     pub normalized_cache: RefCell<FxHashMap<Ty<'tcx>, Ty<'tcx>>>,
 
     pub inhabitedness_cache: RefCell<FxHashMap<Ty<'tcx>, DefIdForest>>,
-
-    /// Set of nodes which mark locals as mutable which end up getting used at
-    /// some point. Local variable definitions not in this set can be warned
-    /// about.
-    pub used_mut_nodes: RefCell<NodeSet>,
 
     /// Caches the results of trait selection. This cache is used
     /// for things that do not have to do with the parameters in scope.
@@ -1281,7 +1309,6 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             rcache: RefCell::new(FxHashMap()),
             normalized_cache: RefCell::new(FxHashMap()),
             inhabitedness_cache: RefCell::new(FxHashMap()),
-            used_mut_nodes: RefCell::new(NodeSet()),
             selection_cache: traits::SelectionCache::new(),
             evaluation_cache: traits::EvaluationCache::new(),
             rvalue_promotable_to_static: RefCell::new(NodeMap()),
@@ -1347,6 +1374,27 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         } else {
             self.cstore.def_path_hash(def_id)
         }
+    }
+
+    pub fn def_path_debug_str(self, def_id: DefId) -> String {
+        // We are explicitly not going through queries here in order to get
+        // crate name and disambiguator since this code is called from debug!()
+        // statements within the query system and we'd run into endless
+        // recursion otherwise.
+        let (crate_name, crate_disambiguator) = if def_id.is_local() {
+            (self.crate_name.clone(),
+             self.sess.local_crate_disambiguator())
+        } else {
+            (self.cstore.crate_name_untracked(def_id.krate),
+             self.cstore.crate_disambiguator_untracked(def_id.krate))
+        };
+
+        format!("{}[{}]{}",
+                crate_name,
+                // Don't print the whole crate disambiguator. That's just
+                // annoying in debug output.
+                &(crate_disambiguator.as_str())[..4],
+                self.def_path(def_id).to_string_no_crate())
     }
 
     pub fn metadata_encoding_version(self) -> Vec<u8> {

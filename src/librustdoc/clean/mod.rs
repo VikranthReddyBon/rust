@@ -112,6 +112,7 @@ impl<T: Clean<U>, U> Clean<Vec<U>> for P<[T]> {
 #[derive(Clone, Debug)]
 pub struct Crate {
     pub name: String,
+    pub version: Option<String>,
     pub src: PathBuf,
     pub module: Option<Item>,
     pub externs: Vec<(CrateNum, ExternalCrate)>,
@@ -183,6 +184,7 @@ impl<'a, 'tcx> Clean<Crate> for visit_ast::RustdocVisitor<'a, 'tcx> {
 
         Crate {
             name,
+            version: None,
             src,
             module: Some(module),
             externs,
@@ -1681,6 +1683,21 @@ impl Type {
             _ => false
         }
     }
+
+    pub fn generics(&self) -> Option<&[Type]> {
+        match *self {
+            ResolvedPath { ref path, .. } => {
+                path.segments.last().and_then(|seg| {
+                    if let PathParameters::AngleBracketed { ref types, .. } = seg.params {
+                        Some(&**types)
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl GetDefId for Type {
@@ -2491,7 +2508,7 @@ impl Clean<BareFunctionDecl> for hir::BareFnTy {
                 type_params: Vec::new(),
                 where_predicates: Vec::new()
             },
-            decl: (&*self.decl, &[][..]).clean(cx),
+            decl: (&*self.decl, &self.arg_names[..]).clean(cx),
             abi: self.abi,
         }
     }
