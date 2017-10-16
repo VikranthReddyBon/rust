@@ -288,9 +288,10 @@ impl<'a, 'b, 'tcx, M: Machine<'tcx>> Visitor<'tcx> for ConstantExtractor<'a, 'b,
                 mir::Literal::Value { value: &ty::Const { val: ConstVal::Unevaluated(def_id, substs), .. } } => {
                     debug!("global_item: {:?}, {:?}", def_id, substs);
                     let substs = this.ecx.tcx.trans_apply_param_substs(this.instance.substs, &substs);
+                    let param_env = this.ecx.tcx.param_env(def_id);
                     let instance = Instance::resolve(
                         this.ecx.tcx,
-                        M::param_env(this.ecx),
+                        param_env,
                         def_id,
                         substs,
                     ).ok_or(EvalErrorKind::TypeckError)?; // turn error prop into a panic to expose associated type in const issue

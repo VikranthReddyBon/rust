@@ -14,6 +14,7 @@ use ty::subst::{Kind, Subst};
 use traits;
 use syntax::abi::Abi;
 use util::ppaux;
+use syntax::codemap::DUMMY_SP;
 
 use std::fmt;
 
@@ -211,7 +212,11 @@ fn resolve_associated_item<'a, 'tcx>(
            def_id, trait_id, rcvr_substs);
 
     let trait_ref = ty::TraitRef::from_method(tcx, trait_id, rcvr_substs);
-    let vtbl = tcx.trans_fulfill_obligation(param_env, ty::Binder(trait_ref))?;
+    let vtbl = ty::queries::trans_fulfill_obligation::try_get(
+        tcx,
+        DUMMY_SP,
+        (param_env, ty::Binder(trait_ref)),
+    ).ok()?;
 
     // Now that we know which impl is being used, we can dispatch to
     // the actual function:
