@@ -1,4 +1,4 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,15 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Regression test for #35593. Check that we can reuse this trivially
-// equal example.
+#![deny(warnings)]
 
-// revisions:rpass1 rpass2
-// compile-flags: -Z query-dep-graph
+#![feature(slice_patterns)]
+#![feature(test)]
 
-#![feature(rustc_attrs)]
-#![rustc_partition_reused(module="issue_35593", cfg="rpass2")]
+extern crate test;
 
-fn main() {
-    println!("hello world");
-}
+mod dispatch;
+mod pattern;
