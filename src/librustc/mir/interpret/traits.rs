@@ -24,9 +24,9 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
         let align = self.type_align(trait_ref.self_ty())?;
 
         let ptr_size = self.memory.pointer_size();
-        let methods = ::traits::get_vtable_methods(self.tcx, trait_ref);
+        let methods = self.tcx.vtable_methods(trait_ref);
         let vtable = self.memory.allocate(
-            ptr_size * (3 + methods.count() as u64),
+            ptr_size * (3 + methods.len() as u64),
             ptr_size,
             None,
         )?;
@@ -40,8 +40,8 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
         let align_ptr = vtable.offset(ptr_size * 2, &self)?;
         self.memory.write_ptr_sized_unsigned(align_ptr, PrimVal::Bytes(align as u128))?;
 
-        for (i, method) in ::traits::get_vtable_methods(self.tcx, trait_ref).enumerate() {
-            if let Some((def_id, substs)) = method {
+        for (i, method) in methods.iter().enumerate() {
+            if let Some((def_id, substs)) = *method {
                 let instance = self.resolve(def_id, substs)?;
                 let fn_ptr = self.memory.create_fn_alloc(instance);
                 let method_ptr = vtable.offset(ptr_size * (3 + i as u64), &self)?;
