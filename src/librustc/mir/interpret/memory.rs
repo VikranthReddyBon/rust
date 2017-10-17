@@ -216,6 +216,9 @@ pub struct Memory<'a, 'tcx: 'a, M: Machine<'tcx>> {
     pub tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     /// Memory regions that are locked by some function
+    ///
+    /// Only mutable (static mut, heap, stack) allocations have an entry in this map.
+    /// The entry is created when allocating the memory and deleted after deallocation.
     locks: HashMap<u64, RangeMap<LockInfo<'tcx>>>,
 }
 
@@ -517,6 +520,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
         }
         let locks = match self.locks.get(&ptr.alloc_id.0) {
             Some(locks) => locks,
+            // immutable static or other constant memory
             None => return Ok(()),
         };
         let frame = self.cur_frame;
@@ -555,6 +559,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
 
         let locks = match self.locks.get_mut(&ptr.alloc_id.0) {
             Some(locks) => locks,
+            // immutable static or other constant memory
             None => return Ok(()),
         };
 
@@ -603,6 +608,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
         let cur_frame = self.cur_frame;
         let locks = match self.locks.get_mut(&ptr.alloc_id.0) {
             Some(locks) => locks,
+            // immutable static or other constant memory
             None => return Ok(()),
         };
 
@@ -680,6 +686,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> Memory<'a, 'tcx, M> {
         };
         let locks = match self.locks.get_mut(&ptr.alloc_id.0) {
             Some(locks) => locks,
+            // immutable static or other constant memory
             None => return Ok(()),
         };
 
