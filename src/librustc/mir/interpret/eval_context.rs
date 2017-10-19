@@ -31,9 +31,6 @@ pub struct EvalContext<'a, 'tcx: 'a, M: Machine<'tcx>> {
     /// Lvalues that were suspended by the validation subsystem, and will be recovered later
     pub(crate) suspended: HashMap<DynamicLifetime, Vec<ValidationQuery<'tcx>>>,
 
-    /// Precomputed statics, constants and promoteds.
-    pub globals: HashMap<GlobalId<'tcx>, PtrAndAlign>,
-
     /// The virtual call stack.
     pub(crate) stack: Vec<Frame<'tcx>>,
 
@@ -175,7 +172,6 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
             tcx,
             memory: Memory::new(tcx, limits.memory_size, memory_data),
             suspended: HashMap::new(),
-            globals: HashMap::new(),
             stack: Vec::new(),
             stack_limit: limits.stack_limit,
             steps_remaining: limits.step_limit,
@@ -249,7 +245,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
                     instance,
                     promoted: None,
                 };
-                return Ok(Value::ByRef(*self.globals.get(&cid).expect("static/const not cached")));
+                return Ok(Value::ByRef(self.tcx.interpret_interner.borrow().get_cached(cid).expect("static/const not cached")));
             }
 
             Aggregate(..) |
@@ -1304,7 +1300,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
                             instance: self.frame().instance,
                             promoted: Some(index),
                         };
-                        Value::ByRef(*self.globals.get(&cid).expect("promoted not cached"))
+                        Value::ByRef(self.tcx.interpret_interner.borrow().get_cached(cid).expect("promoted not cached"))
                     }
                 };
 
@@ -1407,7 +1403,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
     }
 
     pub fn read_global_as_value(&self, gid: GlobalId) -> Value {
-        Value::ByRef(*self.globals.get(&gid).expect("global not cached"))
+        Value::ByRef(self.tcx.interpret_interner.borrow().get_cached(gid).expect("global not cached"))
     }
 
     pub fn operand_ty(&self, operand: &mir::Operand<'tcx>) -> Ty<'tcx> {

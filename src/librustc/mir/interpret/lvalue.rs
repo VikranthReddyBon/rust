@@ -115,7 +115,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
                     promoted: None,
                 };
                 Ok(Some(Value::ByRef(
-                    *self.globals.get(&cid).expect("global not cached"),
+                    self.tcx.interpret_interner.borrow().get_cached(cid).expect("global not cached"),
                 )))
             }
             Projection(ref proj) => self.try_read_lvalue_projection(proj),
@@ -196,7 +196,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
                     promoted: None,
                 };
                 Lvalue::Ptr {
-                    ptr: *self.globals.get(&gid).expect("uncached global"),
+                    ptr: self.tcx.interpret_interner.borrow().get_cached(gid).expect("uncached global"),
                     extra: LvalueExtra::None,
                 }
             }

@@ -29,7 +29,7 @@ pub fn eval_body<'a, 'tcx>(
     }
 
     let mir = ecx.load_mir(instance.def)?;
-    if !ecx.globals.contains_key(&cid) {
+    if tcx.interpret_interner.borrow().get_cached(cid).is_none() {
         let size = ecx.type_size_with_substs(mir.return_ty, instance.substs)?
             .expect("unsized global");
         let align = ecx.type_align_with_substs(mir.return_ty, instance.substs)?;
@@ -39,7 +39,7 @@ pub fn eval_body<'a, 'tcx>(
             None,
         )?;
         let aligned = !ecx.is_packed_with_substs(mir.return_ty, instance.substs)?;
-        ecx.globals.insert(
+        tcx.interpret_interner.borrow_mut().cache(
             cid,
             PtrAndAlign {
                 ptr: ptr.into(),
@@ -59,7 +59,7 @@ pub fn eval_body<'a, 'tcx>(
 
         while ecx.step()? {}
     }
-    let value = *ecx.globals.get(&cid).expect("global not cached");
+    let value = tcx.interpret_interner.borrow().get_cached(cid).expect("global not cached");
     let ret_ty = ecx.monomorphize(mir.return_ty, instance.substs);
     Ok((value, ret_ty))
 }

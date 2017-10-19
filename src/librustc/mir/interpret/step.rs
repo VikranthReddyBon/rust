@@ -208,7 +208,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
             instance,
             promoted: None,
         };
-        if self.globals.contains_key(&cid) {
+        if self.tcx.interpret_interner.borrow().get_cached(cid).is_some() {
             return Ok(false);
         }
         if self.tcx.has_attr(instance.def_id(), "linkage") {
@@ -226,7 +226,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
             None,
         )?;
         let aligned = !self.is_packed(mir.return_ty)?;
-        self.globals.insert(
+        self.tcx.interpret_interner.borrow_mut().cache(
             cid,
             PtrAndAlign {
                 ptr: ptr.into(),
@@ -308,7 +308,7 @@ impl<'a, 'b, 'tcx, M: Machine<'tcx>> Visitor<'tcx> for ConstantExtractor<'a, 'b,
                         instance: this.instance,
                         promoted: Some(index),
                     };
-                    if this.ecx.globals.contains_key(&cid) {
+                    if this.ecx.tcx.interpret_interner.borrow().get_cached(cid).is_some() {
                         return Ok(false);
                     }
                     let mir = &this.mir.promoted[index];
@@ -325,7 +325,7 @@ impl<'a, 'b, 'tcx, M: Machine<'tcx>> Visitor<'tcx> for ConstantExtractor<'a, 'b,
                         None,
                     )?;
                     let aligned = !this.ecx.is_packed(mir.return_ty)?;
-                    this.ecx.globals.insert(
+                    this.ecx.tcx.interpret_interner.borrow_mut().cache(
                         cid,
                         PtrAndAlign {
                             ptr: ptr.into(),
