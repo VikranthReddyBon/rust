@@ -31,4 +31,6 @@ const fn f(x: usize) -> usize {
 #[allow(unused_variables)]
 fn main() {
     let a : [i32; f(X)]; //~ NOTE for constant expression here
+    //~| WARNING constant evaluation error: non-constant path
+    //~| on by default
 }
